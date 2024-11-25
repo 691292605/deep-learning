@@ -1,0 +1,109 @@
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
+from torch import optim
+from torch.nn import CrossEntropyLoss
+from torchvision.datasets import MNIST
+from torch.utils.data import DataLoader
+
+
+tensor_tool = transforms.ToTensor()
+transform = (transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,)),
+    #transforms.Grayscale(num_output_channels=3)
+]))
+train_dataset = MNIST(root = './data', train = True, transform = transform, download = True)
+test_dataset = MNIST(root = './data', train = False, transform = transform, download = True)
+train_loader = DataLoader(dataset = train_dataset, batch_size = 64, shuffle = True)
+test_loader = DataLoader(dataset = test_dataset, batch_size = 1000, shuffle = False)
+
+
+class Encoding(nn.Module):
+    def __init__(self, seq_len, dim):
+        super(Encoding, self).__init__()
+        pe = torch.zeros(seq_len, dim)
+        position = torch.arange(0, seq_len).unsqueeze(1)
+        func = 1 / (10000 ** (torch.arange(0, dim, 2) // dim)).float()
+        pe[:, 0::2] = torch.sin(position * func)
+        pe[:, 1::2] = torch.cos(position * func)
+        self.register_buffer('pe', pe.unsqueeze(0))
+    def forward(self, data):
+        dim = data.size(1)
+        return data + self.pe[:, :dim]
+
+
+class ViT(nn.Module):
+    def __init__(self, patch_size, embedding_size, heads_num, hidden_size, output_size):
+        super(ViT, self).__init__()
+        self.patch_embedding = nn.Conv2d(1, embedding_size, kernel_size=patch_size, stride=patch_size)
+        self.class_token = torch.randn(1, 1, embedding_size)
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=embedding_size,
+                                       nhead=heads_num, dim_feedforward=hidden_size,
+                                       batch_first=True),num_layers=1 )
+        self.output = nn.Linear(embedding_size, output_size)
+
+
+    def forward(self, x):
+        x = self.patch_embedding(x)
+        x = x.flatten(2).transpose(1, 2)      #x[64,49,768]
+        class_token = self.class_token
+        class_token = class_token.expand(x.shape[0], -1, -1)
+        encode = Encoding(x.shape[1], x.shape[2])
+        pos_encode = encode(x)
+        x += pos_encode
+        x = torch.cat((x, class_token), dim = 1)      #x[64, 50, 128]
+        x = self.transformer(x)     #x[64, 50, 128]
+        x = x[:, 0]
+        x = self.output(x)
+        return x
+
+
+Patch_size = 7
+Embedding_size = 256
+Heads_num = 8
+Hidden_size = 256
+Output_size = 10
+model = ViT(Patch_size, Embedding_size, Heads_num, Hidden_size, Output_size)
+
+
+Loss_func = CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+total_train_step = 0
+total_test_step = 0
+train_size = len(train_dataset)
+test_size = len(test_dataset)
+print("训练集的长度为:{}".format(train_size))
+print("测试集的长度为:{}".format(test_size))
+
+
+epochs = 5
+for epoch in range(epochs):
+    print("------------第{}轮训练开始---------------".format(epoch + 1))
+    running_loss = 0.0
+    for images, targets in train_loader:
+        images = images.view(-1, 1, 28, 28)
+        outputs = model(images)
+        loss = Loss_func(outputs, targets)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        running_loss = running_loss + loss.item()
+        total_train_step = total_train_step + 1
+        if total_train_step % 500 == 0:
+            print("训练总次数:{}，本次训练中的损失={}".format(total_train_step, loss.item()))
+    print("本轮训练的总损失={}".format(running_loss))
+    total_test_loss = 0.0
+    total_accuracy = 0
+    with torch.no_grad():
+        for Data in test_loader:
+            imgs, targets = Data
+            imgs = imgs.view(imgs.size(0), 1, 28, 28)
+            outputs = model(imgs)
+            result_loss = Loss_func(outputs, targets)
+            total_test_loss = total_test_loss + result_loss.item()
+            accuracy = (outputs.argmax(1) == targets).sum()
+            total_accuracy = total_accuracy + accuracy
+    print("整个测试集上的损失={}".format(total_test_loss))
+    print("整体测试集的正确率={}".format(total_accuracy / test_size))
