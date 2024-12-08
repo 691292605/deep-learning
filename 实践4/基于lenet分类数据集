@@ -1,1 +1,175 @@
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+from setuptools.command.bdist_egg import analyze_egg
+from torch import optim
+from torch.nn import CrossEntropyLoss
+import torchvision
+from torch.utils.data import DataLoader, Dataset
+import random
+from PIL import Image
+
+
+random.seed(0)
+readvdnames = lambda x: open(x).read().rstrip().split('\n')
+
+
+class TinySegData(Dataset):
+    def __init__(self, db_root="TinySeg", img_size=256, phase='train'):
+        classes = ['person', 'bird', 'car', 'cat', 'plane', ]
+        seg_ids = [1, 2, 3, 4, 5]
+        templ_image = db_root + "/JPEGImages/{}.jpg"
+        templ_mask = db_root + "/Annotations/{}.png"
+        ids = readvdnames(db_root + "/ImageSets/" + phase + ".txt")
+        samples = []
+        for i in ids:
+            samples.append([templ_image.format(i), templ_mask.format(i)])
+        self.samples = samples
+        self.phase = phase
+        self.db_root = db_root
+        self.img_size = img_size
+        self.color_transform = torchvision.transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        if self.phase == 'train':
+            return self.get_train_item(idx)
+        else:
+            return self.get_test_item(idx)
+
+    def get_train_item(self, idx):
+        sample = self.samples[idx]
+        image = Image.open(sample[0])
+        if random.randint(0, 1) > 0:
+            image = self.color_transform(image)
+        image = np.asarray(image)[..., ::-1]  # to BGR
+        seg_gt = (np.asarray(Image.open(sample[1]).convert('P'))).astype(np.uint8)
+        image = image.astype(np.float32)
+        image = image / 127.5 - 1  # -1~1
+        if random.randint(0, 1) > 0:
+            image = image[:, ::-1, :]  # HWC
+            seg_gt = seg_gt[:, ::-1]
+        height, width = image.shape[0], image.shape[1]
+        if height == width:
+            miny, maxy = 0, 256
+            minx, maxx = 0, 256
+        elif height > width:
+            miny = np.random.randint(0, height - 256)
+            maxy = miny + 256
+            minx = 0
+            maxx = 256
+        else:
+            miny = 0
+            maxy = 256
+            minx = np.random.randint(0, width - 256)
+            maxx = minx + 256
+        image = image[miny:maxy, minx:maxx, :].copy()
+        seg_gt = seg_gt[miny:maxy, minx:maxx].copy()
+        if self.img_size != 256:
+            new_size = (self.img_size, self.img_size)
+            image = cv2.resize(image, new_size, interpolation=cv2.INTER_LINEAR)
+            seg_gt = cv2.resize(seg_gt, new_size, interpolation=cv2.INTER_NEAREST)
+        image = np.transpose(image, (2, 0, 1))  # To CHW
+        return image, seg_gt, sample
+
+    def get_test_item(self, idx):
+        sample = self.samples[idx]
+        image = cv2.imread(sample[0])
+        seg_gt = (np.asarray(Image.open(sample[1]).convert('P'))).astype(np.uint8)
+        image = cv2.resize(image, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR).copy()
+        seg_gt = cv2.resize(seg_gt, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST).copy()
+        image = image.astype(np.float32)
+        image = image / 127.5 - 1  # -1~1
+        image = np.transpose(image, (2, 0, 1))
+        return image, seg_gt, sample
+
+class LeNet(nn.Module):
+    def __init__(self, num_classes=5):
+        super(LeNet, self).__init__()
+        self.conv1 = nn.Conv2d(3, 6, 5, padding=2)
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(6, 16, 5)
+        self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool2d(2, 2)
+
+        self.fc_input_size = self._calculate_fc_input_size(128, 128)
+
+        self.fc1 = nn.Linear(self.fc_input_size, 120)
+        self.relu3 = nn.ReLU()
+        self.fc2 = nn.Linear(120, 84)
+        self.relu4 = nn.ReLU()
+        self.fc3 = nn.Linear(84, num_classes)
+
+    def _calculate_fc_input_size(self, height, width):
+        x = torch.randn(1, 3, height, width)
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
+        return x.view(-1).shape[0]
+
+
+    def forward(self, x):
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
+        x = x.view(-1, self.fc_input_size)  # 使用计算出的输入大小
+        x = self.relu3(self.fc1(x))
+        x = self.relu4(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+def get_classes(mask, num_classes):
+    batch_size = mask.shape[0]
+    classes = torch.zeros([batch_size, num_classes])
+    for i in range(batch_size):
+        value = int(torch.max(mask[i]))
+        classes[i, value - 1] = 1
+    return classes
+
+
+if __name__ == "__main__":
+    train_loader = DataLoader(TinySegData(img_size=128, phase='train'), batch_size=32, shuffle=True, num_workers=8)
+    test_loader = DataLoader(TinySegData(img_size=128, phase='val'), batch_size=32, shuffle=True, num_workers=8)
+
+    Input_size = 128
+    Hidden_size = 256
+    Output_size = 5
+    model = LeNet()
+
+    Loss_func = CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    total_test_step = 0
+    train_size = 6000
+    test_size = 624
+    print("训练集的长度为:{}".format(train_size))
+    print("测试集的长度为:{}".format(test_size))
+    epochs = 10
+    for epoch in range(epochs):
+        print("------------第{}轮训练开始---------------".format(epoch + 1))
+        running_loss = 0.0
+        for total_train_step, (images, seg_gts, rets) in enumerate(train_loader):
+            outputs = model(images)
+            seg_gts = get_classes(seg_gts, Output_size)
+            loss = Loss_func(outputs, seg_gts)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            running_loss = running_loss + loss.item()
+            if total_train_step % 10 == 0:
+                print("训练总次数:{}，本次训练中的损失={}".format(total_train_step, loss.item()))
+        print("本轮训练的总损失={}".format(running_loss))
+        total_test_loss = 0.0
+        total_accuracy = 0
+        with torch.no_grad():
+            for _, (imgs, seg_gts, rets) in enumerate(test_loader):
+                outputs = model(imgs)
+                seg_gts = get_classes(seg_gts, Output_size)
+                result_loss = Loss_func(outputs, seg_gts)
+                total_test_loss = total_test_loss + result_loss.item()
+                accuracy = (outputs.argmax(1) == seg_gts.argmax(1)).sum()
+                total_accuracy = total_accuracy + accuracy
+        print("整个测试集上的损失={}".format(total_test_loss))
+        print("整体测试集的正确率={}".format(total_accuracy / test_size))
 
