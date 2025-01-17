@@ -2,9 +2,9 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from setuptools.command.bdist_egg import analyze_egg
+#from setuptools.command.bdist_egg import analyze_egg
 from torch import optim
-from torch.nn import CrossEntropyLoss
+from torch.nn import CrossEntropyLoss, MSELoss
 import torchvision
 from torch.utils.data import DataLoader, Dataset
 import random
@@ -124,10 +124,24 @@ def get_classes(mask, num_classes):
     batch_size = mask.shape[0]
     classes = torch.zeros([batch_size, num_classes])
     for i in range(batch_size):
-        value = int(torch.max(mask[i]))
-        classes[i, value - 1] = 1
+        masks = mask != 0
+        non_zero = torch.unique(mask[masks])
+        for j in range(len(non_zero)):
+            classes[i, non_zero[j] - 1] = 1
     return classes
 
+
+def evaluate(outputs, labels, t):
+  ret = outputs.shape[0]
+  for i in range(outputs.shape[0]):
+    for j in range(outputs.shape[1]):
+      if labels[i, j].item() > t and outputs[i, j].item() < t:
+        ret -= 1 # class loss
+        break
+      if labels[i, j].item() < t and outputs[i, j].item() > t:
+        ret -= 1 # class gain
+        break
+  return ret
 
 if __name__ == "__main__":
     train_loader = DataLoader(TinySegData(img_size=128, phase='train'), batch_size=32, shuffle=True, num_workers=8)
@@ -138,7 +152,7 @@ if __name__ == "__main__":
     Output_size = 5
     model = LeNet()
 
-    Loss_func = CrossEntropyLoss()
+    Loss_func = MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-5)
     total_test_step = 0
     train_size = 6000
@@ -152,6 +166,8 @@ if __name__ == "__main__":
         for total_train_step, (images, seg_gts, rets) in enumerate(train_loader):
             outputs = model(images)
             seg_gts = get_classes(seg_gts, Output_size)
+            #print(seg_gts.shape)
+            #print(outputs.shape)
             loss = Loss_func(outputs, seg_gts)
             optimizer.zero_grad()
             loss.backward()
@@ -168,8 +184,7 @@ if __name__ == "__main__":
                 seg_gts = get_classes(seg_gts, Output_size)
                 result_loss = Loss_func(outputs, seg_gts)
                 total_test_loss = total_test_loss + result_loss.item()
-                accuracy = (outputs.argmax(1) == seg_gts.argmax(1)).sum()
+                accuracy = evaluate(outputs, seg_gts, 1e-4)
                 total_accuracy = total_accuracy + accuracy
         print("整个测试集上的损失={}".format(total_test_loss))
         print("整体测试集的正确率={}".format(total_accuracy / test_size))
-
