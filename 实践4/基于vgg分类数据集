@@ -1,1 +1,183 @@
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+#from setuptools.command.bdist_egg import analyze_egg
+from torch import optim
+from torch.nn import CrossEntropyLoss, MSELoss
+import torchvision
+from torch.utils.data import DataLoader, Dataset
+import random
+from PIL import Image
+from torchvision.models import resnet18
 
+random.seed(0)
+readvdnames = lambda x: open(x).read().rstrip().split('\n')
+
+
+class TinySegData(Dataset):
+    def __init__(self, db_root="TinySeg", img_size=256, phase='train'):
+        classes = ['person', 'bird', 'car', 'cat', 'plane', ]
+        seg_ids = [1, 2, 3, 4, 5]
+        templ_image = db_root + "/JPEGImages/{}.jpg"
+        templ_mask = db_root + "/Annotations/{}.png"
+        ids = readvdnames(db_root + "/ImageSets/" + phase + ".txt")
+        samples = []
+        for i in ids:
+            samples.append([templ_image.format(i), templ_mask.format(i)])
+        self.samples = samples
+        self.phase = phase
+        self.db_root = db_root
+        self.img_size = img_size
+        self.color_transform = torchvision.transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        if self.phase == 'train':
+            return self.get_train_item(idx)
+        else:
+            return self.get_test_item(idx)
+
+    def get_train_item(self, idx):
+        sample = self.samples[idx]
+        image = Image.open(sample[0])
+        if random.randint(0, 1) > 0:
+            image = self.color_transform(image)
+        image = np.asarray(image)[..., ::-1]  # to BGR
+        seg_gt = (np.asarray(Image.open(sample[1]).convert('P'))).astype(np.uint8)
+        image = image.astype(np.float32)
+        image = image / 127.5 - 1  # -1~1
+        if random.randint(0, 1) > 0:
+            image = image[:, ::-1, :]  # HWC
+            seg_gt = seg_gt[:, ::-1]
+        height, width = image.shape[0], image.shape[1]
+        if height == width:
+            miny, maxy = 0, 256
+            minx, maxx = 0, 256
+        elif height > width:
+            miny = np.random.randint(0, height - 256)
+            maxy = miny + 256
+            minx = 0
+            maxx = 256
+        else:
+            miny = 0
+            maxy = 256
+            minx = np.random.randint(0, width - 256)
+            maxx = minx + 256
+        image = image[miny:maxy, minx:maxx, :].copy()
+        seg_gt = seg_gt[miny:maxy, minx:maxx].copy()
+        if self.img_size != 256:
+            new_size = (self.img_size, self.img_size)
+            image = cv2.resize(image, new_size, interpolation=cv2.INTER_LINEAR)
+            seg_gt = cv2.resize(seg_gt, new_size, interpolation=cv2.INTER_NEAREST)
+        image = np.transpose(image, (2, 0, 1))  # To CHW
+        return image, seg_gt, sample
+
+    def get_test_item(self, idx):
+        sample = self.samples[idx]
+        image = cv2.imread(sample[0])
+        seg_gt = (np.asarray(Image.open(sample[1]).convert('P'))).astype(np.uint8)
+        image = cv2.resize(image, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR).copy()
+        seg_gt = cv2.resize(seg_gt, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST).copy()
+        image = image.astype(np.float32)
+        image = image / 127.5 - 1  # -1~1
+        image = np.transpose(image, (2, 0, 1))
+        return image, seg_gt, sample
+
+class vgg(nn.Module):
+    def __init__(self, num_classes=5):
+        super(vgg, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(65536, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+def get_classes(mask, num_classes):
+    batch_size = mask.shape[0]
+    classes = torch.zeros([batch_size, num_classes])
+    for i in range(batch_size):
+        masks = mask != 0
+        non_zero = torch.unique(mask[masks])
+        for j in range(len(non_zero)):
+            classes[i, non_zero[j] - 1] = 1
+    return classes
+
+
+def evaluate(outputs, labels, t):
+  ret = outputs.shape[0]
+  for i in range(outputs.shape[0]):
+    for j in range(outputs.shape[1]):
+      if labels[i, j].item() > t and outputs[i, j].item() < t:
+        ret -= 1 # class loss
+        break
+      if labels[i, j].item() < t and outputs[i, j].item() > t:
+        ret -= 1 # class gain
+        break
+  return ret
+
+if __name__ == "__main__":
+    train_loader = DataLoader(TinySegData(img_size=128, phase='train'), batch_size=32, shuffle=True, num_workers=8)
+    test_loader = DataLoader(TinySegData(img_size=128, phase='val'), batch_size=32, shuffle=True, num_workers=8)
+
+    Input_size = 128
+    Hidden_size = 256
+    Output_size = 5
+    model = vgg()
+
+    Loss_func = MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    total_test_step = 0
+    train_size = 6000
+    test_size = 624
+    print("训练集的长度为:{}".format(train_size))
+    print("测试集的长度为:{}".format(test_size))
+    epochs = 10
+    for epoch in range(epochs):
+        print("------------第{}轮训练开始---------------".format(epoch + 1))
+        running_loss = 0.0
+        for total_train_step, (images, seg_gts, rets) in enumerate(train_loader):
+            outputs = model(images)
+            seg_gts = get_classes(seg_gts, Output_size)
+            #print(seg_gts.shape)
+            #print(outputs.shape)
+            loss = Loss_func(outputs, seg_gts)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            running_loss = running_loss + loss.item()
+            if total_train_step % 10 == 0:
+                print("训练总次数:{}，本次训练中的损失={}".format(total_train_step, loss.item()))
+        print("本轮训练的总损失={}".format(running_loss))
+        total_test_loss = 0.0
+        total_accuracy = 0
+        with torch.no_grad():
+            for _, (imgs, seg_gts, rets) in enumerate(test_loader):
+                outputs = model(imgs)
+                seg_gts = get_classes(seg_gts, Output_size)
+                result_loss = Loss_func(outputs, seg_gts)
+                total_test_loss = total_test_loss + result_loss.item()
+                accuracy = evaluate(outputs, seg_gts, 1e-4)
+                total_accuracy = total_accuracy + accuracy
+        print("整个测试集上的损失={}".format(total_test_loss))
+        print("整体测试集的正确率={}".format(total_accuracy / test_size))
