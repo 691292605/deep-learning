@@ -17,7 +17,7 @@
 - 池化层采用最大池化并进行归一化
 - 将数据展平后经过线性变换，Relu函数作用，dropout层，线性变换后得到最终的output，经过合适的参数训练后模型的准确率可以达到98%接近99%
 ## resent-18模型
-通过调取resent函数进行训练，最终的准确率可以达到99%
+通过调取resent函数进行训练，最终的准确率可以达到98%，接近99%
 ## ViT网络：
 - 将图片转换为patches序列：将图形经过卷积计算进行分块，其中输入通道为1，输出通道为embedding_size，卷积核大小为patch_size，步长为patch_size，在此模型中，patch_size为7，embedding_size为256
 - 将patches铺平并添加绝对位置编码
