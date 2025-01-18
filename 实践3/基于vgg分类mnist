@@ -22,18 +22,18 @@ class vgg(nn.Module):
     def __init__(self, num_classes=10):
         super(vgg, self).__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.Conv2d(1, 32, kernel_size=5, padding=2),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=5, padding=2),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(7 * 7 * 64, 128),
+            nn.Linear(3136, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
             nn.Linear(128, num_classes),
@@ -58,7 +58,7 @@ print("训练集的长度为:{}".format(train_size))
 print("测试集的长度为:{}".format(test_size))
 
 
-epochs = 5
+epochs = 8
 for epoch in range(epochs):
     print("------------第{}轮训练开始---------------".format(epoch + 1))
     running_loss = 0.0
